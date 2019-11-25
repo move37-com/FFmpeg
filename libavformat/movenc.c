@@ -105,6 +105,7 @@ static const AVOption options[] = {
     { "wallclock", NULL, 0, AV_OPT_TYPE_CONST, {.i64 = MOV_PRFT_SRC_WALLCLOCK}, 0, 0, AV_OPT_FLAG_ENCODING_PARAM, "prft"},
     { "pts", NULL, 0, AV_OPT_TYPE_CONST, {.i64 = MOV_PRFT_SRC_PTS}, 0, 0, AV_OPT_FLAG_ENCODING_PARAM, "prft"},
     { "empty_hdlr_name", "write zero-length name string in hdlr atoms within mdia and minf atoms", offsetof(MOVMuxContext, empty_hdlr_name), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM},
+    { "allow_small_timescale", "Do not modify track timescale to be >= 10000", 0, AV_OPT_TYPE_CONST, {.i64 = FF_MOV_FLAG_ALLOW_SMALL_TSCALE}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, "movflags" },
     { NULL },
 };
 
@@ -6331,8 +6332,10 @@ static int mov_init(AVFormatContext *s)
                 track->timescale = mov->video_track_timescale;
             } else {
                 track->timescale = st->time_base.den;
-                while(track->timescale < 10000)
-                    track->timescale *= 2;
+                if (!(mov->flags & FF_MOV_FLAG_ALLOW_SMALL_TSCALE)) {
+                    while(track->timescale < 10000)
+                        track->timescale *= 2;
+                }
             }
             if (st->codecpar->width > 65535 || st->codecpar->height > 65535) {
                 av_log(s, AV_LOG_ERROR, "Resolution %dx%d too large for mov/mp4\n", st->codecpar->width, st->codecpar->height);
