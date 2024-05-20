@@ -1571,6 +1571,7 @@ static int hls_window(AVFormatContext *s, int last, VariantStream *vs)
     double prog_date_time = vs->initial_prog_date_time;
     double *prog_date_time_p = (hls->flags & HLS_PROGRAM_DATE_TIME) ? &prog_date_time : NULL;
     int byterange_mode = (hls->flags & HLS_SINGLE_FILE) || (hls->max_seg_size > 0);
+    char *variant_folder;
 
     hls->version = 2;
     if (!(hls->flags & HLS_ROUND_DURATIONS)) {
@@ -1639,12 +1640,26 @@ static int hls_window(AVFormatContext *s, int last, VariantStream *vs)
                                    hls->flags & HLS_SINGLE_FILE, vs->init_range_length, 0);
         }
 
+        variant_folder = av_strdup(hls->baseurl);
+        if (!variant_folder)
+            return AVERROR(ENOMEM);
+
+        if (av_stristr(hls->baseurl, "%v")) {
+            if (replace_str_data_in_filename(&variant_folder, hls->baseurl, 'v', vs->varname) < 1) {
+                ret = AVERROR(EINVAL);
+                av_freep(&variant_folder);
+                goto fail;
+            }
+        }
+
         ret = ff_hls_write_file_entry(byterange_mode ? hls->m3u8_out : vs->out, en->discont, byterange_mode,
                                       en->duration, hls->flags & HLS_ROUND_DURATIONS,
-                                      en->size, en->pos, hls->baseurl,
+                                      en->size, en->pos, variant_folder,
                                       en->filename,
                                       en->discont_program_date_time ? &en->discont_program_date_time : prog_date_time_p,
                                       en->keyframe_size, en->keyframe_pos, hls->flags & HLS_I_FRAMES_ONLY);
+        av_freep(&variant_folder);
+
         if (en->discont_program_date_time)
             en->discont_program_date_time -= en->duration;
         if (ret < 0) {
