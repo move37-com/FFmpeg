@@ -914,12 +914,32 @@ static int hls_mux_init(AVFormatContext *s, VariantStream *vs)
         return ret;
 
     if (hls->segment_type == SEGMENT_TYPE_FMP4) {
-        set_http_options(s, &options, hls);
-        if (byterange_mode) {
-            ret = hlsenc_io_open(s, &vs->out, vs->basename, &options);
+
+        char *filename = NULL;
+        if (hls->key_info_file || hls->encrypt) {
+            av_dict_set(&options, "encryption_key", vs->key_string, 0);
+            av_dict_set(&options, "encryption_iv", vs->iv_string, 0);
+            if (byterange_mode) {
+                filename = av_asprintf("crypto:%s", vs->basename);
+            }
+            else {
+                filename = av_asprintf("crypto:%s", vs->base_output_dirname);
+            }
         } else {
-            ret = hlsenc_io_open(s, &vs->out, vs->base_output_dirname, &options);
+            if (byterange_mode) {
+                filename = av_asprintf("%s", vs->basename);
+            }
+            else {
+                filename = av_asprintf("%s", vs->base_output_dirname);
+            }
         }
+        if (!filename) {
+            av_dict_free(&options);
+            return AVERROR(ENOMEM);
+        }
+
+        set_http_options(s, &options, hls);
+        ret = hlsenc_io_open(s, &vs->out, filename, &options);
         av_dict_free(&options);
     }
     if (ret < 0) {
@@ -1680,6 +1700,45 @@ fail:
     return ret;
 }
 
+static int encrypt_init(AVFormatContext *s, VariantStream *vs) {
+    char iv_string[KEYSIZE*2 + 1];
+    HLSContext *c = s->priv_data;
+    int err = 0;
+
+    if (c->key_info_file || c->encrypt) {
+
+        if (c->key_info_file && c->encrypt) {
+            av_log(s, AV_LOG_WARNING, "Cannot use both -hls_key_info_file and -hls_enc,"
+                                      " ignoring -hls_enc\n");
+        }
+
+        if (!vs->encrypt_started || (c->flags & HLS_PERIODIC_REKEY)) {
+            if (c->key_info_file) {
+                if ((err = hls_encryption_start(s, vs)) < 0)
+                    return err;
+            } else {
+                if (!c->encrypt_started) {
+                    if ((err = do_encrypt(s, vs)) < 0)
+                        return err;
+                    c->encrypt_started = 1;
+                }
+                av_strlcpy(vs->key_uri, c->key_uri, sizeof(vs->key_uri));
+                av_strlcpy(vs->key_string, c->key_string, sizeof(vs->key_string));
+                av_strlcpy(vs->iv_string, c->iv_string, sizeof(vs->iv_string));
+            }
+            vs->encrypt_started = 1;
+        }
+        err = av_strlcpy(iv_string, vs->iv_string, sizeof(iv_string));
+        if (!err) {
+            snprintf(iv_string, sizeof(iv_string), "%032"PRIx64, vs->sequence);
+            memset(vs->iv_string, 0, sizeof(vs->iv_string));
+            memcpy(vs->iv_string, iv_string, sizeof(iv_string));
+        }
+    }
+
+    return 0;
+}
+
 static int hls_start(AVFormatContext *s, VariantStream *vs)
 {
     HLSContext *c = s->priv_data;
@@ -1688,7 +1747,6 @@ static int hls_start(AVFormatContext *s, VariantStream *vs)
     AVDictionary *options = NULL;
     const char *proto = NULL;
     int use_temp_file = 0;
-    char iv_string[KEYSIZE*2 + 1];
     int err = 0;
 
     if (c->flags & HLS_SINGLE_FILE) {
@@ -1772,41 +1830,9 @@ static int hls_start(AVFormatContext *s, VariantStream *vs)
             return AVERROR(ENOMEM);
         ff_format_set_url(oc, new_name);
     }
+    if ((err = encrypt_init(s, vs)) < 0)
+        goto fail;
 
-    if (c->key_info_file || c->encrypt) {
-        if (c->segment_type == SEGMENT_TYPE_FMP4) {
-            av_log(s, AV_LOG_ERROR, "Encrypted fmp4 not yet supported\n");
-            return AVERROR_PATCHWELCOME;
-        }
-
-        if (c->key_info_file && c->encrypt) {
-            av_log(s, AV_LOG_WARNING, "Cannot use both -hls_key_info_file and -hls_enc,"
-                  " ignoring -hls_enc\n");
-        }
-
-        if (!vs->encrypt_started || (c->flags & HLS_PERIODIC_REKEY)) {
-            if (c->key_info_file) {
-                if ((err = hls_encryption_start(s, vs)) < 0)
-                    goto fail;
-            } else {
-                if (!c->encrypt_started) {
-                    if ((err = do_encrypt(s, vs)) < 0)
-                        goto fail;
-                    c->encrypt_started = 1;
-                }
-                av_strlcpy(vs->key_uri, c->key_uri, sizeof(vs->key_uri));
-                av_strlcpy(vs->key_string, c->key_string, sizeof(vs->key_string));
-                av_strlcpy(vs->iv_string, c->iv_string, sizeof(vs->iv_string));
-            }
-            vs->encrypt_started = 1;
-        }
-        err = av_strlcpy(iv_string, vs->iv_string, sizeof(iv_string));
-        if (!err) {
-            snprintf(iv_string, sizeof(iv_string), "%032"PRIx64, vs->sequence);
-            memset(vs->iv_string, 0, sizeof(vs->iv_string));
-            memcpy(vs->iv_string, iv_string, sizeof(iv_string));
-        }
-    }
     if (c->segment_type != SEGMENT_TYPE_FMP4) {
         if (oc->oformat->priv_class && oc->priv_data) {
             av_opt_set(oc->priv_data, "mpegts_flags", "resend_headers", 0);
@@ -3091,6 +3117,9 @@ static int hls_init(AVFormatContext *s)
             if (p)
                 *p = '.';
         }
+
+        if ((ret = encrypt_init(s, vs)) < 0)
+            return ret;
 
         if ((ret = hls_mux_init(s, vs)) < 0)
             return ret;
